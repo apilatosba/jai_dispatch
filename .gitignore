@@ -1,3 +1,5 @@
 .build/
 examples/**
 !examples/*.jai
+test.jai
+test

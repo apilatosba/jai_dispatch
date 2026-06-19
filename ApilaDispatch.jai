@@ -37,6 +37,28 @@
 #import "Basic";
 #import "System";
 
+// surely this works Clueless
+#if CPU == .X64 {
+   CACHE_LINE_SIZE :: 64;
+} else {
+   CACHE_LINE_SIZE :: 128;
+}
+
+TLSItem :: struct(T: Type) {
+   #insert #run -> string {
+      sb: String_Builder;
+      if    T.(*Type_Info).type == .STRUCT   ||
+            T.(*Type_Info).type == .ENUM     ||
+            T.(*Type_Info).type == .POINTER {
+         print_to_builder(*sb, "using #as item: T #align CACHE_LINE_SIZE;");
+      } else {
+         print_to_builder(*sb, "#as item: T #align CACHE_LINE_SIZE;");
+      }
+
+      return builder_to_string(*sb);
+   };
+}
+
 // globals
 threads:       Thread_Group;
 threadCount:   s32 = -69;  // Thread_Group.init expects an s32 not an int.
