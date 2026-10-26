@@ -33,6 +33,17 @@
 // maybe it is safer to use Table rather than arrays for TLS
 //
 
+//
+// i need different modes of this library. first of all the threads shouldnt be global.
+// the modes im talking about are:
+//    - fixed number of threads (the current one)
+//    - dynamic number of threads. this is like a job system, you just push a function, it looks for any free threads. if it finds a free thread gives it the job, otherwise it creates a new thread.
+//
+// when it comes to being global or not, i wanted different stuff to have their own isolated stuff so that it doesnt get disturbed by the rest of the stuff going on.
+// probably you need to have a ApilaDispatchContext and then every function of this library would take it as a first parameter. InitializeThreads would return it, and also it would take the mode (dynamic or fixed).
+//          - apila, 22/10/26
+//
+
 #import "Thread";
 #import "Basic";
 #import "System";
@@ -59,12 +70,6 @@ TLSItem :: struct(T: Type) {
    };
 }
 
-// globals
-threads:       Thread_Group;
-threadCount:   s32 = -69;  // Thread_Group.init expects an s32 not an int.
-                           // by default -69 so if you accidentally use it before you initialize
-                           // you will notice early
-
 // any work you define should has this as its first field
 WorkHeader :: struct {
    // parameter work is to be casted to work type defined by the user
@@ -72,20 +77,32 @@ WorkHeader :: struct {
    isManuallyAdded:  bool;
 }
 
-InitializeThreads :: () {
+ThreadsData :: struct {
+   threads:       Thread_Group;
+   threadCount:   s32 = -69;  // Thread_Group.init expects an s32 not an int.
+                              // by default -69 so if you accidentally use it before you initialize
+                              // you will notice early
+}
+
+// you can just free the pointer
+InitializeThreads :: () -> *ThreadsData {
    WorkDispatcherProc :: (group: *Thread_Group, thread: *Thread, work: *void) -> Thread_Continue_Status {
       header: *WorkHeader = cast(*WorkHeader) work;
       header.execute(group, thread, header);
       return .CONTINUE;
    }
 
-   numCpus := get_number_of_processors();
-   threadCount = max(numCpus - 1, 2);
-   init(*threads, threadCount, WorkDispatcherProc);
+   result := New(ThreadsData);
 
-   threads.name = "Apila Engine Thread Group";
-   threads.logging = false;
-   start(*threads);
+   numCpus := get_number_of_processors();
+   result.threadCount = max(numCpus - 1, 2);
+   init(*result.threads, result.threadCount, WorkDispatcherProc);
+
+   result.threads.name = "Apila Engine Thread Group";
+   result.threads.logging = false;
+   start(*result.threads);
+
+   return result;
 }
 
 // you can call this too if you want to define the work struct yourself
@@ -96,7 +113,7 @@ InitializeThreads :: () {
 //    execute function in must be properly set
 // i know i can make two versions of these the internally used one wouldnt set isManuallyAdded to true
 // and exported one would set it automatically but i dont think i will ever use this function. so, bleah, who cares.
-AddWork :: (work: *$T) #modify {
+AddWork :: (threads: *ThreadsData, work: *$T) #modify {
    // reject if the first field of T is not of type WorkHeader
    ti := cast(*Type_Info) T;
    if (ti.type != .STRUCT) return false;
@@ -113,11 +130,11 @@ AddWork :: (work: *$T) #modify {
    return false;
 } {
    header := cast(*WorkHeader) work;
-   add_work(*threads, work);
+   add_work(*threads.threads, work);
 }
 
-GetCompletedWorks :: () -> [] *void {
-   completedWorks := get_completed_work(*threads);
+GetCompletedWorks :: (threads: *ThreadsData) -> [] *void {
+   completedWorks := get_completed_work(*threads.threads);
 
    for completedWorks {
       header := cast(*WorkHeader) it;
@@ -189,7 +206,7 @@ GetCompletedWorks :: () -> [] *void {
 GenerateDispatchFunctionNoParameterMissing :: (parameterCount: int) -> string {
    b: String_Builder;
 
-   print_to_builder(*b, "DispatchFunction :: (function: #type (");
+   print_to_builder(*b, "DispatchFunction :: (threads: *ThreadsData, function: #type (");
 
    if (parameterCount > 0) {
       for 0..parameterCount - 2 {
@@ -206,7 +223,7 @@ GenerateDispatchFunctionNoParameterMissing :: (parameterCount: int) -> string {
 
    print_to_builder(*b, ") -> *void {\n");
 
-   print_to_builder(*b, "   return DispatchFunctionWithoutThreadGroupAndThread(function");
+   print_to_builder(*b, "   return DispatchFunctionWithoutThreadGroupAndThread(threads, function");
 
    for 0..parameterCount - 1 {
       print_to_builder(*b, ", p%", it);
@@ -224,7 +241,7 @@ GenerateDispatchFunctionOneParameterMissing :: (parameterCount: int) -> string {
 
    b: String_Builder;
 
-   print_to_builder(*b, "DispatchFunction :: (function: #type (");
+   print_to_builder(*b, "DispatchFunction :: (threads: *ThreadsData, function: #type (");
 
    if (parameterCount > 0) {
       for 0..parameterCount - 2 {
@@ -249,7 +266,7 @@ GenerateDispatchFunctionOneParameterMissing :: (parameterCount: int) -> string {
 
 
    print_to_builder(*b, "   #if USE_THREAD_GROUP {\n");
-   print_to_builder(*b, "      return DispatchFunctionWithThreadGroup(function");
+   print_to_builder(*b, "      return DispatchFunctionWithThreadGroup(threads, function");
 
    for 1..parameterCount - 1 {
       print_to_builder(*b, ", p%", it);
@@ -257,7 +274,7 @@ GenerateDispatchFunctionOneParameterMissing :: (parameterCount: int) -> string {
    print_to_builder(*b, ");\n");
 
    print_to_builder(*b, "   } else #if USE_THREAD {\n");
-   print_to_builder(*b, "      return DispatchFunctionWithThread(function");
+   print_to_builder(*b, "      return DispatchFunctionWithThread(threads, function");
 
    for 1..parameterCount - 1 {
       print_to_builder(*b, ", p%", it);
@@ -275,7 +292,7 @@ GenerateDispatchFunctionTwoParametersMissing :: (parameterCount: int) -> string 
 
    b: String_Builder;
 
-   print_to_builder(*b, "DispatchFunction :: (function: #type (");
+   print_to_builder(*b, "DispatchFunction :: (threads: *ThreadsData, function: #type (");
 
    if (parameterCount > 0) {
       for 0..parameterCount - 2 {
@@ -294,12 +311,12 @@ GenerateDispatchFunctionTwoParametersMissing :: (parameterCount: int) -> string 
    print_to_builder(*b, ") -> *void {\n");
 
    print_to_builder(*b, "   USE_THREAD_GROUP :: T0 == *Thread_Group;\n");
-   print_to_builder(*b, "   USE_THREAD :: T0 == *Thread;\n");
+   print_to_builder(*b, "   USE_THREAD :: T1 == *Thread;\n");
 
    print_to_builder(*b, "   #assert USE_THREAD_GROUP == true && USE_THREAD == true \"two parameters were not provided and your function doesnt take both of *Thread and *Thread_Group. Maybe you forgot to provide one or two arguments?\";\n");
 
 
-   print_to_builder(*b, "   return DispatchFunctionWithThreadGroup(function");
+   print_to_builder(*b, "   return DispatchFunctionWithThreadGroupAndThread(threads, function");
 
    for 2..parameterCount - 1 {
       print_to_builder(*b, ", p%", it);
@@ -313,7 +330,7 @@ GenerateDispatchFunctionTwoParametersMissing :: (parameterCount: int) -> string 
 
 GenerateDispatchFunctionWithThread :: (parameterCount: int) -> string {
    b: String_Builder;
-   print_to_builder(*b, "DispatchFunctionWithThread :: (function: #type (thread: *Thread");
+   print_to_builder(*b, "DispatchFunctionWithThread :: (threads: *ThreadsData, function: #type (thread: *Thread");
 
    for 0.. parameterCount - 1 {
       print_to_builder(*b, ", _: $T%", it);
@@ -363,7 +380,7 @@ GenerateDispatchFunctionWithThread :: (parameterCount: int) -> string {
       print_to_builder(*b, "   work.f%1 = p%1;\n", it);
    }
 
-   print_to_builder(*b, "   AddWork(work);\n");
+   print_to_builder(*b, "   AddWork(threads, work);\n");
    print_to_builder(*b, "   return work;\n");
    print_to_builder(*b, "}\n");
 
@@ -372,7 +389,7 @@ GenerateDispatchFunctionWithThread :: (parameterCount: int) -> string {
 
 GenerateDispatchFunctionWithThreadGroup :: (parameterCount: int) -> string {
    b: String_Builder;
-   print_to_builder(*b, "DispatchFunctionWithThreadGroup :: (function: #type (group: *Thread_Group");
+   print_to_builder(*b, "DispatchFunctionWithThreadGroup :: (threads: *ThreadsData, function: #type (group: *Thread_Group");
 
    for 0.. parameterCount - 1 {
       print_to_builder(*b, ", _: $T%", it);
@@ -422,7 +439,7 @@ GenerateDispatchFunctionWithThreadGroup :: (parameterCount: int) -> string {
       print_to_builder(*b, "   work.f%1 = p%1;\n", it);
    }
 
-   print_to_builder(*b, "   AddWork(work);\n");
+   print_to_builder(*b, "   AddWork(threads, work);\n");
    print_to_builder(*b, "   return work;\n");
    print_to_builder(*b, "}\n");
 
@@ -431,7 +448,7 @@ GenerateDispatchFunctionWithThreadGroup :: (parameterCount: int) -> string {
 
 GenerateDispatchFunctionWithThreadGroupAndThread :: (parameterCount: int) -> string {
    b: String_Builder;
-   print_to_builder(*b, "DispatchFunctionWithThreadGroupAndThread :: (function: #type (group: *Thread_Group, thread: *Thread");
+   print_to_builder(*b, "DispatchFunctionWithThreadGroupAndThread :: (threads: *ThreadsData, function: #type (group: *Thread_Group, thread: *Thread");
 
    for 0.. parameterCount - 1 {
       print_to_builder(*b, ", _: $T%", it);
@@ -481,7 +498,7 @@ GenerateDispatchFunctionWithThreadGroupAndThread :: (parameterCount: int) -> str
       print_to_builder(*b, "   work.f%1 = p%1;\n", it);
    }
 
-   print_to_builder(*b, "   AddWork(work);\n");
+   print_to_builder(*b, "   AddWork(threads, work);\n");
    print_to_builder(*b, "   return work;\n");
    print_to_builder(*b, "}\n");
 
@@ -490,7 +507,7 @@ GenerateDispatchFunctionWithThreadGroupAndThread :: (parameterCount: int) -> str
 
 GenerateDispatchFunctionWithoutThreadGroupAndThread :: (parameterCount: int) -> string {
    b: String_Builder;
-   print_to_builder(*b, "DispatchFunctionWithoutThreadGroupAndThread :: (function: #type (");
+   print_to_builder(*b, "DispatchFunctionWithoutThreadGroupAndThread :: (threads: *ThreadsData, function: #type (");
 
    if (parameterCount > 0) {
       for 0..parameterCount - 2 {
@@ -548,7 +565,7 @@ GenerateDispatchFunctionWithoutThreadGroupAndThread :: (parameterCount: int) -> 
       print_to_builder(*b, "   work.f%1 = p%1;\n", it);
    }
 
-   print_to_builder(*b, "   AddWork(work);\n");
+   print_to_builder(*b, "   AddWork(threads, work);\n");
    print_to_builder(*b, "   return work;\n");
    print_to_builder(*b, "}\n");
 
